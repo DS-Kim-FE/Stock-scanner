@@ -47,7 +47,7 @@ def get_market_sum_pages(page_list, market="KOSPI"):
             continue
     return pd.DataFrame({'종목코드': codes, '종목명': names, '등락률': changes})
 
-def get_price_data(code, max_pages=60):  # 주봉 분석을 위해 기본 수집 페이지를 60(약 600일, 120주)으로 확대
+def get_price_data(code, max_pages=60):  # 주봉 분석을 위해 기본 수집 페이지를 60(약 600일, 120주)으로 유지
     url = f"https://finance.naver.com/item/sise_day.naver?code={code}"
     dfs = []
     for page in range(1, max_pages + 1):
@@ -67,67 +67,6 @@ def get_price_data(code, max_pages=60):  # 주봉 분석을 위해 기본 수집
             df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce')
     df['날짜'] = pd.to_datetime(df['날짜'], errors='coerce')
     return df.dropna(subset=['날짜', '종가']).sort_values('날짜').reset_index(drop=True)
-
-def load_foreign_ratio_all(market="KOSPI", max_pages=40):
-    sosok = "0" if market == "KOSPI" else "1"
-    ratio_dict = {}
-    base_url = (f"https://finance.naver.com/sise/sise_foreign_hold.naver"
-                f"?sosok={sosok}")
-    try:
-        res = requests.get(f"{base_url}&page=1", headers=get_headers(), timeout=10)
-        res.encoding = 'euc-kr'
-        soup = BeautifulSoup(res.text, 'html.parser')
-        pager = soup.select_one('td.pgRR a')
-        if pager and 'page=' in pager.get('href',''):
-            m = re.search(r'page=(\d+)', pager['href'])
-            total_pages = int(m.group(1)) if m else max_pages
-        else:
-            total_pages = max_pages
-        total_pages = min(total_pages, max_pages)
-        ratio_dict.update(_parse_foreign_page(soup))
-        for page in range(2, total_pages + 1):
-            try:
-                r = requests.get(f"{base_url}&page={page}",
-                                 headers=get_headers(), timeout=8)
-                r.encoding = 'euc-kr'
-                s = BeautifulSoup(r.text, 'html.parser')
-                ratio_dict.update(_parse_foreign_page(s))
-                time.sleep(0.15)
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return ratio_dict
-
-def _parse_foreign_page(soup):
-    result = {}
-    table = soup.select_one('table.type_2')
-    if not table:
-        return result
-    for tr in table.select('tr'):
-        tds = tr.find_all('td')
-        if len(tds) < 8:
-            continue
-        a = tr.find('a', href=True)
-        if not a:
-            continue
-        m = re.search(r'code=(\d{6})', a['href'])
-        if not m:
-            continue
-        code = m.group(1)
-        try:
-            ratio_txt = tds[7].get_text(strip=True).replace('%','').replace(',','').strip()
-            ratio = float(ratio_txt)
-            result[code] = ratio
-        except (ValueError, IndexError):
-            continue
-    return result
-
-def _fmt_ratio(ratio: float) -> str:
-    if ratio >= 30:   return f"{ratio:.2f}% 🔴고비중"
-    elif ratio >= 15: return f"{ratio:.2f}% 🟠중비중"
-    elif ratio >= 5:  return f"{ratio:.2f}% 🟡저비중"
-    else:             return f"{ratio:.2f}% ⚪미미"
 
 def get_ma5_slope(price_series):
     try:
@@ -158,7 +97,7 @@ def calc_cci(df, period=20):
     return (tp - ma) / (0.015 * mad.replace(0, np.nan))
 
 # ─────────────────────────────────────────────
-# 점수 기반 신호 결정 (주봉 일목 도입 및 수정)
+# 점수 기반 신호 결정 (주봉 일목 고도화)
 # ─────────────────────────────────────────────
 def calc_signal_score(last, prev, ichimoku_status, w_ichimoku_status, cci_now, cci_prev):
     score = 0
@@ -173,8 +112,8 @@ def calc_signal_score(last, prev, ichimoku_status, w_ichimoku_status, cci_now, c
     score += s_ichi
     detail['구름대(일)'] = s_ichi
 
-    # 2. 일목균형표 점수 (주봉) - 가중치 증가
-    if '상향돌파' in w_ichimoku_status: s_w_ichi = 4  # 주봉 돌파는 매우 강한 추세 전환 신호
+    # 2. 일목균형표 점수 (주봉) - 정밀 주간 추세 점수화
+    if '상향돌파' in w_ichimoku_status: s_w_ichi = 4
     elif '하향이탈' in w_ichimoku_status: s_w_ichi = -4
     elif '구름대 위' in w_ichimoku_status: s_w_ichi = 2
     elif '구름대 아래' in w_ichimoku_status: s_w_ichi = -2
@@ -212,7 +151,6 @@ def calc_signal_score(last, prev, ichimoku_status, w_ichimoku_status, cci_now, c
         s_momentum = s_macd
     elif s_macd == 0 and s_cci != 0:   # CCI 신호만 존재
         s_momentum = s_cci
-    # 신호가 엇갈리는 경우는 0점 처리
     score += s_momentum
     detail['모멘텀'] = s_momentum
 
@@ -231,11 +169,10 @@ def calc_signal_score(last, prev, ichimoku_status, w_ichimoku_status, cci_now, c
     is_high_disp     = disparity > 15
     is_low_disp      = disparity < -10
     
-    # 주봉 일목 구름대 최근 돌파 여부 판단
     is_weekly_breakout = '상향돌파' in w_ichimoku_status
 
     if is_falling_entry: signal = "⚠️ 구름대주의"
-    elif is_weekly_breakout and momentum_up: signal = "🚀 주간돌파!"  # 주간 일목 돌파 최우선 강세 신호
+    elif is_weekly_breakout and momentum_up: signal = "🚀 주간돌파!"  # 주간 일목 우상향 돌파 강력 추천 신호
     elif (score >= 5 and cloud_breakout and momentum_up): signal = "🔥 적극매수"
     elif (score >= 3 and not is_high_disp and (cloud_breakout or momentum_up)): signal = "📈 매수관심"
     elif (score >= 1 and disparity <= 6 and has_turn and not is_falling_entry): signal = "🌱 진입준비"
@@ -252,11 +189,11 @@ def calc_signal_score(last, prev, ichimoku_status, w_ichimoku_status, cci_now, c
     return score, signal, detail
 
 # ─────────────────────────────────────────────
-# 종목 분석 메인 (주봉 일목 분석 모듈 신설)
+# 종목 분석 메인 (엄격한 일목 돌파 알고리즘 적용)
 # ─────────────────────────────────────────────
-def analyze_stock(code, name, current_change, foreign_dict=None, fetch_investor=True):
+def analyze_stock(code, name, current_change):
     try:
-        # 데이터 수집 (주봉 연산을 위해 기본 60페이지 확보)
+        # 데이터 수집
         df_price = get_price_data(code, max_pages=60)
         if df_price is None or len(df_price) < 80:
             return None
@@ -306,31 +243,40 @@ def analyze_stock(code, name, current_change, foreign_dict=None, fetch_investor=
         prev3 = df_final.iloc[-4]
         prev4 = df_final.iloc[-5]
         
-        # --- 일봉 일목 설명용 텍스트 생성 ---
+        # --- 일봉 일목 엄격 돌파 감지 알고리즘 ---
         price_now = last['종가']
-        ct_now, cb_now = max(last['senkou_a'], last['senkou_b']), min(last['senkou_a'], last['senkou_b'])
+        def cloud_top(row): return max(row['senkou_a'], row['senkou_b'])
+        def cloud_bot(row): return min(row['senkou_a'], row['senkou_b'])
+        
+        ct_now, cb_now = cloud_top(last), cloud_bot(last)
         above_now, below_now = price_now > ct_now, price_now < cb_now
         
         breakout_days = None
         if above_now:
             for days_ago, row in enumerate([prev, prev2, prev3, prev4], start=1):
-                if row['종가'] <= max(row['senkou_a'], row['senkou_b']):
-                    breakout_days = days_ago
-                    break
-                    
+                # 돌파 시점에 구름 아래 또는 내부에 걸쳐 있었는지 확인
+                if row['종가'] <= cloud_top(row):
+                    # [엄격한 상승 검증]: 현재 가격이 돌파 이전보다 확실히 상승했고, 최근 연속 하락세가 아니어야 함
+                    if price_now > row['종가'] and not (last['종가'] < prev['종가'] < prev2['종가']):
+                        breakout_days = days_ago
+                        break
+                        
         breakdown_days = None
         if below_now:
             for days_ago, row in enumerate([prev, prev2, prev3, prev4], start=1):
-                if row['종가'] >= min(row['senkou_a'], row['senkou_b']):
-                    breakdown_days = days_ago
-                    break
+                # 이탈 시점에 구름 위 또는 내부에 있었는지 확인
+                if row['종가'] >= cloud_bot(row):
+                    # [엄격한 하락 검증]: 현재 가격이 이탈 이전보다 낮고, 최근 연속 상승세가 아닐 때 이탈로 정의
+                    if price_now < row['종가'] and not (last['종가'] > prev['종가'] > prev2['종가']):
+                        breakdown_days = days_ago
+                        break
 
         if above_now: ichimoku_status = f"🔥 상향돌파({breakout_days}일전)" if breakout_days is not None else "📈 구름대 위"
         elif below_now: ichimoku_status = f"🧊 하향이탈({breakdown_days}일전)" if breakdown_days is not None else "📉 구름대 아래"
         else:
             prior_rows = [prev, prev2, prev3, prev4]
-            was_above = any(r['종가'] > max(r['senkou_a'], r['senkou_b']) for r in prior_rows)
-            was_below = any(r['종가'] < min(r['senkou_a'], r['senkou_b']) for r in prior_rows)
+            was_above = any(r['종가'] > cloud_top(r) for r in prior_rows)
+            was_below = any(r['종가'] < cloud_bot(r) for r in prior_rows)
             if was_above and not was_below: ichimoku_status = "⚠️ 구름대하락진입"
             elif was_below and not was_above: ichimoku_status = "🌱 구름대상승진입"
             else: ichimoku_status = "🌫️ 구름대 내부"
@@ -339,7 +285,6 @@ def analyze_stock(code, name, current_change, foreign_dict=None, fetch_investor=
         df_w_final = None
         w_ichimoku_status = "-"
         
-        # 주간(Weekly) 캔들 리샘플링 생성
         df_w = df_price.resample('W', on='날짜').agg({
             '종가': 'last',
             '고가': 'max',
@@ -376,33 +321,39 @@ def analyze_stock(code, name, current_change, foreign_dict=None, fetch_investor=
                 w_prev4 = df_w_final.iloc[-5]
                 
                 w_price_now = w_last['종가']
-                w_ct_now = max(w_last['senkou_a'], w_last['senkou_b'])
-                w_cb_now = min(w_last['senkou_a'], w_last['senkou_b'])
+                def w_cloud_top(row): return max(row['senkou_a'], row['senkou_b'])
+                def w_cloud_bot(row): return min(row['senkou_a'], row['senkou_b'])
+                
+                w_ct_now, w_cb_now = w_cloud_top(w_last), w_cloud_bot(w_last)
                 w_above_now = w_price_now > w_ct_now
                 w_below_now = w_price_now < w_cb_now
                 
+                # 주간 돌파 여부 정밀 감지
                 w_breakout_weeks = None
                 if w_above_now:
                     for weeks_ago, row in enumerate([w_prev, w_prev2, w_prev3, w_prev4], start=1):
-                        if row['종가'] <= max(row['senkou_a'], row['senkou_b']):
-                            w_breakout_weeks = weeks_ago
-                            break
-                            
+                        if row['종가'] <= w_cloud_top(row):
+                            # [엄격한 우상향 검증]: 현재 주간 종가가 돌파 이전보다 높고, 장기 주봉 하향 활강세가 아니어야 함
+                            if w_price_now > row['종가'] and not (w_last['종가'] < w_prev['종가'] < w_prev2['종가']):
+                                w_breakout_weeks = weeks_ago
+                                break
+                                
                 w_breakdown_weeks = None
                 if w_below_now:
                     for weeks_ago, row in enumerate([w_prev, w_prev2, w_prev3, w_prev4], start=1):
-                        if row['종가'] >= min(row['senkou_a'], row['senkou_b']):
-                            w_breakdown_weeks = weeks_ago
-                            break
-                            
+                        if row['종가'] >= w_cloud_bot(row):
+                            if w_price_now < row['종가'] and not (w_last['종가'] > w_prev['종가'] > w_prev2['종가']):
+                                w_breakdown_weeks = weeks_ago
+                                break
+                                
                 if w_above_now: 
                     w_ichimoku_status = f"🔥 상향돌파({w_breakout_weeks}주전)" if w_breakout_weeks is not None else "📈 구름대 위"
                 elif w_below_now: 
                     w_ichimoku_status = f"🧊 하향이탈({w_breakdown_weeks}주전)" if w_breakdown_weeks is not None else "📉 구름대 아래"
                 else:
                     w_prior_rows = [w_prev, w_prev2, w_prev3, w_prev4]
-                    w_was_above = any(r['종가'] > max(r['senkou_a'], r['senkou_b']) for r in w_prior_rows)
-                    w_was_below = any(r['종가'] < min(r['senkou_a'], r['senkou_b']) for r in w_prior_rows)
+                    w_was_above = any(r['종가'] > w_cloud_top(r) for r in w_prior_rows)
+                    w_was_below = any(r['종가'] < w_cloud_bot(r) for r in w_prior_rows)
                     if w_was_above and not w_was_below: w_ichimoku_status = "⚠️ 구름대하락진입"
                     elif w_was_below and not w_was_above: w_ichimoku_status = "🌱 구름대상승진입"
                     else: w_ichimoku_status = "🌫️ 구름대 내부"
@@ -433,12 +384,6 @@ def analyze_stock(code, name, current_change, foreign_dict=None, fetch_investor=
         disparity = ((last['종가'] / last['20MA']) - 1) * 100 if last['20MA'] > 0 else 0
         disparity_fmt = f"{'+' if disparity >= 0 else ''}{round(disparity, 2)}%"
         
-        if fetch_investor and foreign_dict is not None:
-            foreign_ratio = foreign_dict.get(code, 0.0)
-            investor_display = _fmt_ratio(foreign_ratio) if foreign_ratio > 0 else "-"
-        else:
-            investor_display = "-"
-            
         # --- 점수 및 최종 신호 계산 ---
         score, signal, detail = calc_signal_score(
             last, prev, ichimoku_status, w_ichimoku_status, cci_now, cci_prev
@@ -452,25 +397,23 @@ def analyze_stock(code, name, current_change, foreign_dict=None, fetch_investor=
             score, signal,
             ichimoku_status, w_ichimoku_status, ma_text,
             cci_display, vol_display,
-            investor_display,
             chart_url
         ]
     except Exception as e:
         return None
 
 # ─────────────────────────────────────────────
-# 스타일 데이터프레임 표시
+# 스타일 데이터프레임 표시 (외국인 제거)
 # ─────────────────────────────────────────────
 COLUMNS = ['코드', '종목명', '등락률', '현재가', '이격률',
            '총점', '신호',
            '일목(일봉)', '일목(주봉)', 'MA크로스',
            'CCI', '거래량',
-           '외국인지분율',
            '차트']
 
 def style_signal(val):
     v = str(val)
-    if '주간돌파' in v: return 'color:white;background-color:#d32f2f;font-weight:bold;' # 주간 돌파 강렬한 레드 테두리/배경
+    if '주간돌파' in v: return 'color:white;background-color:#d32f2f;font-weight:bold;' 
     if '적극매수' in v: return 'color:white;background-color:#b71c1c;font-weight:bold'
     if '매수관심' in v: return 'color:#ef5350;font-weight:bold'
     if '진입준비' in v: return 'color:#ff8f00;font-weight:bold'
@@ -552,14 +495,6 @@ def compress_display(df: pd.DataFrame) -> pd.DataFrame:
     d['신호'] = d['신호'].str.strip()
     return d
 
-def style_investor(val):
-    v = str(val)
-    if '고비중' in v: return 'color:#b71c1c;font-weight:bold'
-    if '중비중' in v: return 'color:#e65100;font-weight:bold'
-    if '저비중' in v: return 'color:#f9a825'
-    if '미미' in v: return 'color:#9e9e9e'
-    return ''
-
 def show_styled_dataframe(dataframe):
     if dataframe.empty:
         st.write("분석된 데이터가 없습니다.")
@@ -582,7 +517,6 @@ def show_styled_dataframe(dataframe):
         .map(lambda x: ('color:#ef5350' if '📈' in str(x) else
                         'color:#64b5f6' if '📉' in str(x) else ''),
              subset=['거래량'])
-        .map(style_investor, subset=['외국인지분율'])
     )
     
     col_cfg = {
@@ -599,7 +533,6 @@ def show_styled_dataframe(dataframe):
         "CCI": st.column_config.TextColumn("CCI"),
         "종목명": st.column_config.TextColumn("종목명"),
         "현재가": st.column_config.NumberColumn("현재가"),
-        "외국인지분율": st.column_config.TextColumn("외국인%"),
     }
     
     st.dataframe(
@@ -613,16 +546,10 @@ def show_styled_dataframe(dataframe):
 # ─────────────────────────────────────────────
 # UI
 # ─────────────────────────────────────────────
-st.title("🛡️ 스마트 데이터 스캐너 v4.3 (주봉 일목 도입 및 신호 고도화)")
+st.title("🛡️ 스마트 데이터 스캐너 v4.4 (돌파 검증 필터 고도화)")
 st.sidebar.header("설정")
 market = st.sidebar.radio("시장 선택", ["KOSPI", "KOSDAQ"])
 selected_pages = st.sidebar.multiselect("분석 페이지 선택", options=list(range(1, 41)), default=[1])
-st.sidebar.markdown("---")
-use_investor = st.sidebar.checkbox(
-    "📡 외인/기관 순매수 수집",
-    value=True,
-    help="종목당 추가 요청 1회 → 분석 시간 약 30% 증가"
-)
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
 **📊 13단계 신호 기준**
@@ -711,16 +638,10 @@ if start_btn:
     if not market_df.empty:
         results = []
         st.session_state['df_all'] = pd.DataFrame()
-        foreign_dict = {}
-        if use_investor:
-            with st.spinner(f"📡 {market} 외국인 보유 비율 수집 중... (최초 1회, 약 20~30초)"):
-                foreign_dict = load_foreign_ratio_all(market=market, max_pages=40)
-            st.info(f"✅ 외국인 지분율 {len(foreign_dict):,}개 종목 수집 완료")
-            
+        
         progress_bar = st.progress(0, text="분석 시작...")
         for i, (_, row) in enumerate(market_df.iterrows()):
-            res = analyze_stock(row['종목코드'], row['종목명'], row['등락률'],
-                                foreign_dict=foreign_dict, fetch_investor=use_investor)
+            res = analyze_stock(row['종목코드'], row['종목명'], row['등락률'])
             if res:
                 results.append(res)
                 df_all = pd.DataFrame(results, columns=COLUMNS)
