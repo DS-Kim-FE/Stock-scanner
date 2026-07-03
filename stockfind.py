@@ -217,7 +217,9 @@ def calc_signal_score(last, prev, ichimoku_status, w_ichimoku_status, cci_now, c
     detail['모멘텀'] = s_momentum
 
     # --- 신호 결정 로직 (주봉 돌파 반영) ---
-    is_above_cloud   = '구름대 위' in ichimoku_status or '상향돌파' in ichimoku_status or '구름대 위' in w_ichimoku_status or '상향돌파' in w_ichimoku_status
+       is_above_cloud = ('구름대 위'  in ichimoku_status or
+                      '상향돌파'   in ichimoku_status or
+                      '관통상승'   in ichimoku_status)
     is_below_cloud   = '구름대 아래' in ichimoku_status or '하향이탈' in ichimoku_status or '구름대 아래' in w_ichimoku_status or '하향이탈' in w_ichimoku_status
     is_falling_entry = '하락진입' in ichimoku_status or '구름대하락진입' in ichimoku_status or '구름대하락진입' in w_ichimoku_status
     
@@ -234,6 +236,10 @@ def calc_signal_score(last, prev, ichimoku_status, w_ichimoku_status, cci_now, c
     # 주봉 일목 구름대 최근 돌파 여부 판단
     is_weekly_breakout = '상향돌파' in w_ichimoku_status
 
+    is_false_breakout = '돌파후하향' in ichimoku_status   # 일시 반등 경고
+    is_penetrate_up   = '관통상승'   in ichimoku_status   # 구름 관통 상승
+
+    if is_fall_e or is_false_breakout:   signal = "⚠️ 구름대주의"
     if is_falling_entry: signal = "⚠️ 구름대주의"
     elif is_weekly_breakout and momentum_up: signal = "🚀 주간돌파!"  # 주간 일목 돌파 최우선 강세 신호
     elif (score >= 5 and cloud_breakout and momentum_up): signal = "🔥 적극매수"
@@ -311,30 +317,67 @@ def analyze_stock(code, name, current_change, foreign_dict=None, fetch_investor=
         ct_now, cb_now = max(last['senkou_a'], last['senkou_b']), min(last['senkou_a'], last['senkou_b'])
         above_now, below_now = price_now > ct_now, price_now < cb_now
         
-        breakout_days = None
-        if above_now:
-            for days_ago, row in enumerate([prev, prev2, prev3, prev4], start=1):
-                if row['종가'] <= max(row['senkou_a'], row['senkou_b']):
-                    breakout_days = days_ago
-                    break
-                    
-        breakdown_days = None
-        if below_now:
-            for days_ago, row in enumerate([prev, prev2, prev3, prev4], start=1):
-                if row['종가'] >= min(row['senkou_a'], row['senkou_b']):
-                    breakdown_days = days_ago
-                    break
+# ── 진짜 상향돌파 감지 ─────────────────────────────────
+# 조건: 이전 1~4일 중 구름대 완전 아래(< cloud_bot)에 있었어야 함
+# 구름대 내부 → 위 는 돌파가 아닌 '관통 상승' → 별도 처리
+breakout_days = None
+if above_now:
+    for days_ago, row in enumerate([prev, prev2, prev3, prev4], start=1):
+        if row['종가'] < cloud_bot(row):          # 완전히 구름대 아래였어야 진짜 돌파
+            breakout_days = days_ago
+            break
 
-        if above_now: ichimoku_status = f"🔥 상향돌파({breakout_days}일전)" if breakout_days is not None else "📈 구름대 위"
-        elif below_now: ichimoku_status = f"🧊 하향이탈({breakdown_days}일전)" if breakdown_days is not None else "📉 구름대 아래"
+# ── 진짜 하향이탈 감지 ─────────────────────────────────
+# 조건: 이전 1~4일 중 구름대 완전 위(> cloud_top)에 있었어야 함
+breakdown_days = None
+if below_now:
+    for days_ago, row in enumerate([prev, prev2, prev3, prev4], start=1):
+        if row['종가'] > cloud_top(row):          # 완전히 구름대 위였어야 진짜 이탈
+            breakdown_days = days_ago
+            break
+
+# ── 5일 추세 방향 확인 (하향 추세 중 구름대 위 = 돌파 아님) ──
+# 최근 3봉 종가 기울기로 단기 방향 판단
+price_slope = last['종가'] - prev2['종가']   # 2거래일 기울기
+is_uptrend  = price_slope > 0
+
+if above_now:
+    if breakout_days is not None and is_uptrend:
+        # 진짜 돌파 + 상승 추세 확인
+        ichimoku_status = f"🔥 상향돌파({breakout_days}일전)"
+    elif breakout_days is not None and not is_uptrend:
+        # 구름대 아래서 올라왔지만 현재 하향 추세 → 일시 반등 가능성
+        ichimoku_status = f"⚠️ 돌파후하향({breakout_days}일전)"
+    else:
+        # 구름대 내부 → 위로 나온 경우 (관통 상승) 또는 오래전 돌파
+        # 이전 5일 내 구름대 내부 통과 여부 확인
+        was_inside = any(
+            cloud_bot(r) <= r['종가'] <= cloud_top(r)
+            for r in [prev, prev2, prev3, prev4]
+        )
+        if was_inside and is_uptrend:
+            ichimoku_status = "🌱 구름대관통상승"   # 구름 내부에서 올라온 것
         else:
-            prior_rows = [prev, prev2, prev3, prev4]
-            was_above = any(r['종가'] > max(r['senkou_a'], r['senkou_b']) for r in prior_rows)
-            was_below = any(r['종가'] < min(r['senkou_a'], r['senkou_b']) for r in prior_rows)
-            if was_above and not was_below: ichimoku_status = "⚠️ 구름대하락진입"
-            elif was_below and not was_above: ichimoku_status = "🌱 구름대상승진입"
-            else: ichimoku_status = "🌫️ 구름대 내부"
-            
+            ichimoku_status = "📈 구름대 위"
+
+elif below_now:
+    if breakdown_days is not None:
+        ichimoku_status = f"🧊 하향이탈({breakdown_days}일전)"
+    else:
+        # 구름대 내부 → 아래로 내려온 경우
+        ichimoku_status = "📉 구름대 아래"
+
+else:
+    # 구름대 내부
+    prior_rows = [prev, prev2, prev3, prev4]
+    was_above  = any(r['종가'] > cloud_top(r) for r in prior_rows)
+    was_below  = any(r['종가'] < cloud_bot(r) for r in prior_rows)
+    if was_above and not was_below:
+        ichimoku_status = "⚠️ 구름대하락진입"
+    elif was_below and not was_above:
+        ichimoku_status = "🌱 구름대상승진입"
+    else:
+        ichimoku_status = "🌫️ 구름대 내부"            
         # ─── 2. 주봉 지표 및 주봉 일목 구름대 계산 ───
         df_w_final = None
         w_ichimoku_status = "-"
@@ -440,6 +483,7 @@ def analyze_stock(code, name, current_change, foreign_dict=None, fetch_investor=
             investor_display = "-"
             
         # --- 점수 및 최종 신호 계산 ---
+        
         score, signal, detail = calc_signal_score(
             last, prev, ichimoku_status, w_ichimoku_status, cci_now, cci_prev
         )
