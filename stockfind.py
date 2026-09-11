@@ -23,11 +23,13 @@ def get_market_sum_pages(page_list, market="KOSPI"):
     codes, names, changes = [], [], []
     for page in page_list:
         url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
-        try:
-            res = requests.get(url, headers=get_headers(), timeout=10)
-            res.encoding = 'euc-kr'
-            soup = BeautifulSoup(res.text, 'html.parser')
-            table = soup.select_one('table.type_2')
+        res = requests.get(url, headers=get_headers(), timeout=10)
+        res.encoding = 'euc-kr'
+        st.write(f"페이지 {page} 상태코드: {res.status_code}")          # ← 추가
+        st.code(res.text[:1500])                                         # ← 추가: 실제로 뭐가 왔는지
+        soup = BeautifulSoup(res.text, 'html.parser')
+        table = soup.select_one('table.type_2')
+        st.write("테이블 찾음?" , table is not None)    
             if not table:
                 continue
             for tr in table.select('tr'):
