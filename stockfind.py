@@ -22,28 +22,26 @@ def get_market_sum_pages(page_list, market="KOSPI"):
     sosok = 0 if market == "KOSPI" else 1
     codes, names, changes = [], [], []
     for page in page_list:
-        url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+        url = (
+            "https://m.stock.naver.com/api/json/sise/siseListJson.nhn"
+            f"?menu=market_sum&sosok={sosok}&pageSize=50&page={page}"
+        )
         try:
             res = requests.get(url, headers=get_headers(), timeout=10)
-            res.encoding = 'euc-kr'
-            soup = BeautifulSoup(res.text, 'html.parser')
-            table = soup.select_one('table.type_2')
-            if not table:
-                continue
-            for tr in table.select('tr'):
-                tds = tr.find_all('td')
-                if len(tds) < 5:
-                    continue
-                a = tr.find('a', href=True)
-                if not a:
-                    continue
-                match = re.search(r'code=(\d{6})', a['href'])
-                if match:
-                    codes.append(match.group(1))
-                    names.append(a.get_text(strip=True))
-                    changes.append(tds[4].get_text(strip=True))
-            time.sleep(0.3)
-        except:
+            data = res.json()
+
+            # ⚠️ 응답이 리스트로 바로 오는지, {"result":{"itemList":[...]}} 처럼
+            # 감싸져 있는지는 실제로 한번 찍어봐야 확실합니다. 아래 한 줄로 먼저 확인하세요:
+            # st.write(data)
+
+            items = data if isinstance(data, list) else data.get("result", {}).get("itemList", [])
+            for item in items:
+                codes.append(item.get("cd"))
+                names.append(item.get("nm"))
+                changes.append(f"{item.get('cr')}%")
+            time.sleep(0.15)
+        except Exception as e:
+            st.warning(f"{page}페이지 수집 실패: {e}")
             continue
     return pd.DataFrame({'종목코드': codes, '종목명': names, '등락률': changes})
 
