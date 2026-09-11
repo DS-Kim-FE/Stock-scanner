@@ -19,32 +19,46 @@ def get_headers():
     }
 
 def get_market_sum_pages(page_list, market="KOSPI"):
-    sosok = 0 if market == "KOSPI" else 1
+    # 코스피(KOSPI)와 코스닥(KOSDAQ) 구분 파라미터 정의
+    market_code = "KOSPI" if market == "KOSPI" else "KOSDAQ"
+    
     codes, names, changes = [], [], []
+    
     for page in page_list:
-        url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+        # 네이버 페이 증권 신규 API 주소 (F12 네트워크 탭에서 확보한 주소)
+        url = (
+            f"https://new-api.stock.naver.com/api/deputy/v1/domestic/stock/kr/stocklist/capitalization"
+            f"?page={page}&pageSize=50&sort=market_cap&direction=desc&classification={market_code}"
+        )
+        
         try:
+            # API 호출
             res = requests.get(url, headers=get_headers(), timeout=10)
-            res.encoding = 'euc-kr'
-            soup = BeautifulSoup(res.text, 'html.parser')
-            table = soup.select_one('table.type_2')
-            if not table:
+            data = res.json()  # BeautifulSoup 대신 즉시 JSON 객체로 변환
+            
+            # 응답 데이터 구조 파싱 (네이버 API 표준 구조 적용)
+            stocks = data.get('stocks', [])
+            if not stocks:
                 continue
-            for tr in table.select('tr'):
-                tds = tr.find_all('td')
-                if len(tds) < 5:
-                    continue
-                a = tr.find('a', href=True)
-                if not a:
-                    continue
-                match = re.search(r'code=(\d{6})', a['href'])
-                if match:
-                    codes.append(match.group(1))
-                    names.append(a.get_text(strip=True))
-                    changes.append(tds[4].get_text(strip=True))
-            time.sleep(0.3)
-        except:
+                
+            for stock in stocks:
+                # 종목코드, 종목명 추출
+                codes.append(stock.get('itemCode'))
+                names.append(stock.get('stockName'))
+                
+                # 등락률 추출 및 부호(+) 가공
+                raw_change = stock.get('fluctuationRate', '0')
+                try:
+                    change_val = float(raw_change)
+                    change_str = f"+{change_val}%" if change_val > 0 else f"{change_val}%"
+                except ValueError:
+                    change_str = f"{raw_change}%"
+                changes.append(change_str)
+                
+            time.sleep(0.1) # 가벼운 요청이므로 대기시간 최소화
+        except Exception as e:
             continue
+            
     return pd.DataFrame({'종목코드': codes, '종목명': names, '등락률': changes})
 
 def get_price_data(code, max_pages=60):  # 주봉 분석을 위해 기본 수집 페이지를 60(약 600일, 120주)으로 확대
