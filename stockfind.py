@@ -14,8 +14,9 @@ from datetime import datetime
 # ─────────────────────────────────────────────
 def get_headers():
     return {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://finance.naver.com/'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Referer': 'https://finance.naver.com/',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
     }
 
 def get_market_sum_pages(page_list, market="KOSPI"):
@@ -42,37 +43,47 @@ def get_market_sum_pages(page_list, market="KOSPI"):
                     codes.append(match.group(1))
                     names.append(a.get_text(strip=True))
                     changes.append(tds[4].get_text(strip=True))
-            time.sleep(0.3)
+            time.sleep(0.15) # 속도 최적화를 위해 대기시간 소폭 단축
         except:
             continue
     return pd.DataFrame({'종목코드': codes, '종목명': names, '등락률': changes})
 
-def get_price_data(code, max_pages=60):  # 주봉 분석을 위해 기본 수집 페이지를 60(약 600일, 120주)으로 확대
-    url = f"https://finance.naver.com/item/sise_day.naver?code={code}"
-    dfs = []
-    for page in range(1, max_pages + 1):
-        try:
-            res = requests.get(f"{url}&page={page}", headers=get_headers(), timeout=10)
-            df_list = pd.read_html(io.StringIO(res.text), encoding='euc-kr')
-            if df_list:
-                dfs.append(df_list[0])
-        except:
-            continue
-    if not dfs:
+def get_price_data(code, max_pages=60):
+    # [네이버 금융 개편 긴급 우회] sise_day.naver 대신 안정적이고 차단 없는 차트 API 사용
+    # 일봉 데이터를 최대로(약 600일 분량) 한 번에 긁어와 분석 시간과 에러 확률을 대폭 줄입니다.
+    url = f"https://fchart.naver.com/sise.nhn?symbol={code}&timeframe=day&count=600&requestType=0"
+    try:
+        res = requests.get(url, headers=get_headers(), timeout=10)
+        soup = BeautifulSoup(res.text, 'xml') # XML 파싱 사용
+        
+        items = soup.find_all('item')
+        if not items:
+            return pd.DataFrame()
+            
+        data = []
+        for item in items:
+            row = item['data'].split('|')
+            if len(row) < 6:
+                continue
+            data.append({
+                '날짜': row[0],
+                '시가': float(row[1]),
+                '고가': float(row[2]),
+                '저가': float(row[3]),
+                '종가': float(row[4]),
+                '거래량': float(row[5])
+            })
+            
+        df = pd.DataFrame(data)
+        df['날짜'] = pd.to_datetime(df['날짜'], format='%Y%m%d', errors='coerce')
+        return df.dropna(subset=['날짜', '종가']).sort_values('날짜').reset_index(drop=True)
+    except Exception as e:
         return pd.DataFrame()
-    df = pd.concat(dfs, ignore_index=True).dropna(how='all')
-    df = df.rename(columns=lambda x: x.strip())
-    for col in ['종가', '고가', '저가', '거래량']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce')
-    df['날짜'] = pd.to_datetime(df['날짜'], errors='coerce')
-    return df.dropna(subset=['날짜', '종가']).sort_values('날짜').reset_index(drop=True)
 
 def load_foreign_ratio_all(market="KOSPI", max_pages=40):
     sosok = "0" if market == "KOSPI" else "1"
     ratio_dict = {}
-    base_url = (f"https://finance.naver.com/sise/sise_foreign_hold.naver"
-                f"?sosok={sosok}")
+    base_url = f"https://finance.naver.com/sise/sise_foreign_hold.naver?sosok={sosok}"
     try:
         res = requests.get(f"{base_url}&page=1", headers=get_headers(), timeout=10)
         res.encoding = 'euc-kr'
@@ -87,12 +98,11 @@ def load_foreign_ratio_all(market="KOSPI", max_pages=40):
         ratio_dict.update(_parse_foreign_page(soup))
         for page in range(2, total_pages + 1):
             try:
-                r = requests.get(f"{base_url}&page={page}",
-                                 headers=get_headers(), timeout=8)
+                r = requests.get(f"{base_url}&page={page}", headers=get_headers(), timeout=8)
                 r.encoding = 'euc-kr'
                 s = BeautifulSoup(r.text, 'html.parser')
                 ratio_dict.update(_parse_foreign_page(s))
-                time.sleep(0.15)
+                time.sleep(0.1)
             except Exception:
                 continue
     except Exception:
@@ -174,7 +184,7 @@ def calc_signal_score(last, prev, ichimoku_status, w_ichimoku_status, cci_now, c
     detail['구름대(일)'] = s_ichi
 
     # 2. 일목균형표 점수 (주봉) - 가중치 증가
-    if '상향돌파' in w_ichimoku_status: s_w_ichi = 4  # 주봉 돌파는 매우 강한 추세 전환 신호
+    if '상향돌파' in w_ichimoku_status: s_w_ichi = 4  
     elif '하향이탈' in w_ichimoku_status: s_w_ichi = -4
     elif '구름대 위' in w_ichimoku_status: s_w_ichi = 2
     elif '구름대 아래' in w_ichimoku_status: s_w_ichi = -2
@@ -185,7 +195,6 @@ def calc_signal_score(last, prev, ichimoku_status, w_ichimoku_status, cci_now, c
     detail['구름대(주)'] = s_w_ichi
 
     # 3. MACD + CCI 모멘텀 통합 점수
-    # MACD 점수 계산
     hist_now = last['MACD_hist']
     hist_prev = prev['MACD_hist']
     macd_slope = hist_now - hist_prev
@@ -195,24 +204,21 @@ def calc_signal_score(last, prev, ichimoku_status, w_ichimoku_status, cci_now, c
     elif hist_now > 0 and macd_slope < 0: s_macd = -1
     else: s_macd = 0
     
-    # CCI 점수 계산
     if cci_prev < -100 and cci_now >= -100: s_cci = 2
     elif cci_prev < 0 and cci_now >= 0: s_cci = 1
     elif cci_prev > 0 and cci_now <= 0: s_cci = -1
     elif cci_prev > 100 and cci_now <= 100: s_cci = -2
     else: s_cci = 0
     
-    # 모멘텀 점수 통합 (MACD, CCI)
     s_momentum = 0
-    if s_macd > 0 and s_cci > 0:       # 둘 다 상승 신호
+    if s_macd > 0 and s_cci > 0:       
         s_momentum = max(s_macd, s_cci)
-    elif s_macd < 0 and s_cci < 0:     # 둘 다 하락 신호
+    elif s_macd < 0 and s_cci < 0:     
         s_momentum = min(s_macd, s_cci)
-    elif s_macd != 0 and s_cci == 0:   # MACD 신호만 존재
+    elif s_macd != 0 and s_cci == 0:   
         s_momentum = s_macd
-    elif s_macd == 0 and s_cci != 0:   # CCI 신호만 존재
+    elif s_macd == 0 and s_cci != 0:   
         s_momentum = s_cci
-    # 신호가 엇갈리는 경우는 0점 처리
     score += s_momentum
     detail['모멘텀'] = s_momentum
 
@@ -231,11 +237,9 @@ def calc_signal_score(last, prev, ichimoku_status, w_ichimoku_status, cci_now, c
     is_high_disp     = disparity > 15
     is_low_disp      = disparity < -10
     
-    # 주봉 일목 구름대 최근 돌파 여부 판단
     is_weekly_breakout = '상향돌파' in w_ichimoku_status
-
     if is_falling_entry: signal = "⚠️ 구름대주의"
-    elif is_weekly_breakout and momentum_up: signal = "🚀 주간돌파!"  # 주간 일목 돌파 최우선 강세 신호
+    elif is_weekly_breakout and momentum_up: signal = "🚀 주간돌파!"  
     elif (score >= 5 and cloud_breakout and momentum_up): signal = "🔥 적극매수"
     elif (score >= 3 and not is_high_disp and (cloud_breakout or momentum_up)): signal = "📈 매수관심"
     elif (score >= 1 and disparity <= 6 and has_turn and not is_falling_entry): signal = "🌱 진입준비"
@@ -252,12 +256,11 @@ def calc_signal_score(last, prev, ichimoku_status, w_ichimoku_status, cci_now, c
     return score, signal, detail
 
 # ─────────────────────────────────────────────
-# 종목 분석 메인 (주봉 일목 분석 모듈 신설)
+# 종목 분석 메인
 # ─────────────────────────────────────────────
 def analyze_stock(code, name, current_change, foreign_dict=None, fetch_investor=True):
     try:
-        # 데이터 수집 (주봉 연산을 위해 기본 60페이지 확보)
-        df_price = get_price_data(code, max_pages=60)
+        df_price = get_price_data(code)
         if df_price is None or len(df_price) < 80:
             return None
         
@@ -324,7 +327,6 @@ def analyze_stock(code, name, current_change, foreign_dict=None, fetch_investor=
                 if row['종가'] >= min(row['senkou_a'], row['senkou_b']):
                     breakdown_days = days_ago
                     break
-
         if above_now: ichimoku_status = f"🔥 상향돌파({breakout_days}일전)" if breakout_days is not None else "📈 구름대 위"
         elif below_now: ichimoku_status = f"🧊 하향이탈({breakdown_days}일전)" if breakdown_days is not None else "📉 구름대 아래"
         else:
@@ -347,7 +349,7 @@ def analyze_stock(code, name, current_change, foreign_dict=None, fetch_investor=
             '거래량': 'sum'
         }).dropna()
         
-        if len(df_w) >= 53: # 최소 52주 데이터 필요
+        if len(df_w) >= 53: 
             w_high_9 = df_w['고가'].rolling(9).max()
             w_low_9 = df_w['저가'].rolling(9).min()
             df_w['tenkan_sen'] = (w_high_9 + w_low_9) / 2
@@ -408,7 +410,7 @@ def analyze_stock(code, name, current_change, foreign_dict=None, fetch_investor=
                     else: w_ichimoku_status = "🌫️ 구름대 내부"
         else:
             w_ichimoku_status = "데이터부족"
-
+            
         # ─── 3. 기타 보조지표 가공 ───
         def ma_cross(l, p, ma_col):
             if p['종가'] <= p[ma_col] and l['종가'] > l[ma_col]: return "🔥GC"
@@ -470,7 +472,7 @@ COLUMNS = ['코드', '종목명', '등락률', '현재가', '이격률',
 
 def style_signal(val):
     v = str(val)
-    if '주간돌파' in v: return 'color:white;background-color:#d32f2f;font-weight:bold;' # 주간 돌파 강렬한 레드 테두리/배경
+    if '주간돌파' in v: return 'color:white;background-color:#d32f2f;font-weight:bold;' 
     if '적극매수' in v: return 'color:white;background-color:#b71c1c;font-weight:bold'
     if '매수관심' in v: return 'color:#ef5350;font-weight:bold'
     if '진입준비' in v: return 'color:#ff8f00;font-weight:bold'
@@ -626,7 +628,6 @@ use_investor = st.sidebar.checkbox(
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
 **📊 13단계 신호 기준**
-
 **[매수 계열]**
 | 신호 | 의미 |
 |:---|:---|
@@ -653,13 +654,13 @@ st.sidebar.markdown("""
 | 📉 매도관심 | 하락전환 총점≤-3 |
 | 🧊 적극매도 | 이탈+모멘텀↓ 총점≤-5 |
 """)
+
 start_btn = st.sidebar.button("🚀 분석 시작")
 
 st.subheader("📊 진단 및 필터링")
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 total_metric, buy_metric, entry_metric = c1.empty(), c2.empty(), c3.empty()
 caution_metric, fall_metric, sell_metric = c4.empty(), c5.empty(), c6.empty()
-
 total_metric.metric("전체", "0개")
 buy_metric.metric("매수계열", "0개")
 entry_metric.metric("진입준비", "0개")
@@ -670,7 +671,6 @@ sell_metric.metric("매도관심↓", "0개")
 fb1,fb2,fb3,fb4,fb5,fb6,fb7,fb8 = st.columns(8)
 if 'filter' not in st.session_state:
     st.session_state.filter = "전체"
-
 if fb1.button("🔄전체", use_container_width=True): st.session_state.filter = "전체"
 if fb2.button("🔥📈매수", use_container_width=True): st.session_state.filter = "매수"
 if fb3.button("🌱진입준비", use_container_width=True): st.session_state.filter = "진입준비"
@@ -713,7 +713,7 @@ if start_btn:
         st.session_state['df_all'] = pd.DataFrame()
         foreign_dict = {}
         if use_investor:
-            with st.spinner(f"📡 {market} 외국인 보유 비율 수집 중... (최초 1회, 약 20~30초)"):
+            with st.spinner(f"📡 {market} 외국인 보유 비율 수집 중... (최초 1회, 약 20초)"):
                 foreign_dict = load_foreign_ratio_all(market=market, max_pages=40)
             st.info(f"✅ 외국인 지분율 {len(foreign_dict):,}개 종목 수집 완료")
             
