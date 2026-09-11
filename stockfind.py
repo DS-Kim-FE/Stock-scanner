@@ -14,9 +14,11 @@ from datetime import datetime
 # ─────────────────────────────────────────────
 def get_headers():
     return {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://finance.naver.com/'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Referer': 'https://finance.naver.com/',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
     }
+
 
 def get_market_sum_pages(page_list, market="KOSPI"):
     sosok = 0 if market == "KOSPI" else 1
@@ -28,7 +30,9 @@ def get_market_sum_pages(page_list, market="KOSPI"):
             res.encoding = 'euc-kr'
             soup = BeautifulSoup(res.text, 'html.parser')
             table = soup.select_one('table.type_2')
+                # get_market_sum_pages 함수 내 table 셀렉트 이후에 아래 코드를 임시로 추가하여 정상 동작 확인
             if not table:
+                st.warning(f"페이지 {page}에서 테이블을 찾을 수 없습니다. 네이버 금융 테이블 클래스가 변경되었을 수 있습니다.")
                 continue
             for tr in table.select('tr'):
                 tds = tr.find_all('td')
@@ -47,26 +51,33 @@ def get_market_sum_pages(page_list, market="KOSPI"):
             continue
     return pd.DataFrame({'종목코드': codes, '종목명': names, '등락률': changes})
 
-def get_price_data(code, max_pages=60):  # 주봉 분석을 위해 기본 수집 페이지를 60(약 600일, 120주)으로 확대
-    url = f"https://finance.naver.com/item/sise_day.naver?code={code}"
-    dfs = []
-    for page in range(1, max_pages + 1):
-        try:
-            res = requests.get(f"{url}&page={page}", headers=get_headers(), timeout=10)
-            df_list = pd.read_html(io.StringIO(res.text), encoding='euc-kr')
-            if df_list:
-                dfs.append(df_list[0])
-        except:
-            continue
-    if not dfs:
+def get_price_data(code, max_pages=60):
+    # 네이버 금융 실시간 멀티기간 시세 데이터 호출 URL (안정성 및 속도 극대화)
+    url = f"https://fchart.naver.com/sise.nhn?symbol={code}&timeframe=day&count=600&requestType=0"
+    try:
+        res = requests.get(url, headers=get_headers(), timeout=10)
+        soup = BeautifulSoup(res.text, 'xml') # XML 파서 사용
+        
+        items = soup.find_all('item')
+        data = []
+        for item in items:
+            # 날짜, 시가, 고가, 저가, 종가, 거래량 파싱
+            row = item['data'].split('|')
+            data.append({
+                '날짜': row[0],
+                '시가': float(row[1]),
+                '고가': float(row[2]),
+                '저가': float(row[3]),
+                '종가': float(row[4]),
+                '거래량': float(row[5])
+            })
+            
+        df = pd.DataFrame(data)
+        df['날짜'] = pd.to_datetime(df['날짜'], format='%Y%m%d', errors='coerce')
+        return df.sort_values('날짜').reset_index(drop=True)
+    except Exception as e:
+        st.error(f"데이터 수집 중 에러 발생: {e}")
         return pd.DataFrame()
-    df = pd.concat(dfs, ignore_index=True).dropna(how='all')
-    df = df.rename(columns=lambda x: x.strip())
-    for col in ['종가', '고가', '저가', '거래량']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce')
-    df['날짜'] = pd.to_datetime(df['날짜'], errors='coerce')
-    return df.dropna(subset=['날짜', '종가']).sort_values('날짜').reset_index(drop=True)
 
 def load_foreign_ratio_all(market="KOSPI", max_pages=40):
     sosok = "0" if market == "KOSPI" else "1"
